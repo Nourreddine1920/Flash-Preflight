@@ -1,0 +1,7 @@
+#MicroXplorer Configuration settings - do not modify
+Mcu.Family=STM32F4
+Mcu.Name=STM32F407V(E-G)Tx
+Mcu.UserName=STM32F407VGTx
+this line has no equals sign at all
+BadUnicode=\uZZZZ
+Trunc
