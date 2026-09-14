@@ -127,8 +127,20 @@ preflight path/to/main.c --mcu STM32F407VGTx --hse-hz 8000000
 reveal the MCU family or the HSE crystal frequency on its own (see [Key options](#key-options)
 below). An `.ioc` file always carries both, so it needs neither flag.
 
+You can pass more than one file, or a glob pattern (quote it so your shell doesn't try to expand
+it first — `preflight` expands globs itself, so this works identically on Windows, macOS and
+Linux):
+
+```sh
+preflight Core/Src/main.c Core/Src/usart.c
+preflight '**/*.ioc'
+```
+
+Every file is scanned and reported; the exit code is the worst across all of them.
+
 Exits `0` if clean, `1` if findings at or above `--fail-on` (default: `warning`) were found, `2`
-on a usage error or unreadable/unparseable input.
+on a usage error, a path that doesn't exist, a glob that matched nothing, or unreadable/
+unparseable input.
 
 ### Key options
 
@@ -156,6 +168,88 @@ on a usage error or unreadable/unparseable input.
 All four rules always appear in the report, including ones that end up `SKIPPED` (with a reason)
 because the input didn't have what that rule needed.
 
+## CI/CD integration
+
+### GitHub Action
+
+```yaml
+- uses: <owner>/preflight@v1
+  with:
+    path: '**/*.ioc'        # default; a file, a list, or a glob pattern
+    fail-on: warning        # info | warning | error | never
+```
+
+Or, without the marketplace action, a raw workflow step:
+
+```yaml
+- uses: actions/setup-python@v5
+  with: { python-version: '3.11' }
+- run: pip install git+https://github.com/<owner>/preflight
+- run: preflight '**/*.ioc' --fail-on warning
+```
+
+The Action does not scan only changed files — it scans everything matching `path` on every run.
+This is deliberate: a changed-files-only mode needs `fetch-depth: 0` on your checkout step to
+work at all, and silently scans *zero files* without it. A full scan of a few small `.ioc`/`.c`
+files is fast enough that the tradeoff isn't worth that footgun.
+
+### pre-commit
+
+```yaml
+# .pre-commit-config.yaml
+repos:
+  - repo: https://github.com/<owner>/preflight
+    rev: v0.1.0
+    hooks:
+      - id: preflight        # scans staged .ioc files
+      # - id: preflight-c     # opt-in: matches nothing until you set `files:`
+      #   files: '^Core/Src/main\.c$'
+```
+
+`preflight-c` matches nothing by default on purpose — a naive `\.c$` pattern would scan every
+vendor file under `Drivers/STM32F4xx_HAL_Driver/Src/`, which is slow and not your config. Point
+`files:` at your own `main.c` (or wherever your inits live) to turn it on.
+
+## JSON output
+
+`--format json` emits a stable, versioned schema meant for scripting and CI tooling:
+
+```json
+{
+  "schema_version": "1.0",
+  "tool": { "name": "preflight", "version": "0.1.0" },
+  "findings": [
+    { "rule_id": "PF002", "rule_name": "Clock / baud mismatch", "severity": "error",
+      "title": "...", "detail": "...", "location": { "file": "...", "line": 29, "key": "..." },
+      "evidence": { "...": "..." }, "remediation": "..." }
+  ],
+  "files": [
+    { "source": "blinky.ioc", "mcu": { "family": "STM32F4", "raw_name": "...", "core": "CM4" },
+      "rules": [ { "rule_id": "PF001", "rule_name": "Pin conflict",
+                   "status": "pass", "skip_reason": null, "finding_count": 0 } ] }
+  ],
+  "summary": { "files_scanned": 1, "errors": 1, "warnings": 0, "info": 0,
+               "rules_run": 2, "rules_skipped": 2 }
+}
+```
+
+`findings[]` is flat and self-contained — each entry carries its own `rule_id`, so
+`jq '.findings[]'` works without walking a nested structure. `files[]` separately carries
+per-rule PASS/FAIL/SKIPPED status per scanned file, since "this rule didn't apply to this file"
+is different from "this rule passed", and a flat findings list has no place for it.
+
+The field names are chosen so a future SARIF exporter is a rename, not a rewrite:
+
+| Preflight JSON | SARIF 2.1.0 |
+|---|---|
+| `findings[].rule_id` | `runs[].results[].ruleId` |
+| `findings[].severity` (`error`/`warning`/`info`) | `runs[].results[].level` (`error`/`warning`/`note`) |
+| `findings[].title` + `detail` | `runs[].results[].message.text` |
+| `findings[].location.file` / `.line` | `...locations[0].physicalLocation.artifactLocation.uri` / `...region.startLine` |
+| `tool.name` / `tool.version` | `runs[].tool.driver.name` / `.version` |
+
+`schema_version` follows semver-for-schemas: a breaking change bumps the major component.
+
 ## Known limitations
 
 These are deliberate scope boundaries, not oversights — each is documented at the point in the
@@ -181,6 +275,11 @@ code where it matters:
   string literals safely, then regexes over the result — this is robust against the usual traps
   (comments, string literals, `#if 0` blocks) but doesn't understand macros, multi-file builds,
   or function-pointer indirection.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the project's ground rules and a worked walkthrough of
+adding a new rule.
 
 ## Development
 
