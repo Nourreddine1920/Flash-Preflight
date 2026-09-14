@@ -1,0 +1,19 @@
+- id: preflight
+  name: preflight (STM32 .ioc config)
+  description: 'Static analysis for STM32 CubeMX .ioc configuration bugs'
+  entry: preflight
+  language: python
+  files: '\.ioc$'
+  pass_filenames: true
+
+- id: preflight-c
+  name: preflight (STM32 HAL C source)
+  description: 'Static analysis for STM32 HAL .c initialisation bugs'
+  entry: preflight
+  language: python
+  # Matches nothing by default. A naive '\.c$' would scan every vendor HAL
+  # file in Drivers/STM32F4xx_HAL_Driver/Src/ too. Opt in explicitly with:
+  #   - id: preflight-c
+  #     files: '^Core/Src/main\.c$'
+  files: '^$'
+  pass_filenames: true
