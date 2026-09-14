@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import glob as glob_module
 import os
 import sys
 from pathlib import Path
 
 from preflight import __version__
-from preflight.findings import Severity
+from preflight.findings import RuleResult, Severity
+from preflight.model import Config
 from preflight.parsers import parse
 from preflight.report import jsonout, text
 from preflight.rules.base import Rule
@@ -16,6 +18,7 @@ from preflight.rules.pin_conflict import PinConflictRule
 from preflight.rules.uninit_peripheral import UninitPeripheralRule
 
 _SEVERITY_BY_NAME = {"info": Severity.INFO, "warning": Severity.WARNING, "error": Severity.ERROR}
+_GLOB_CHARS = frozenset("*?[")
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -23,7 +26,12 @@ def _build_parser() -> argparse.ArgumentParser:
         prog="preflight",
         description="Offline static analyzer for STM32 firmware configuration bugs.",
     )
-    parser.add_argument("path", type=Path, help="Path to a .ioc or generated HAL .c file")
+    parser.add_argument(
+        "paths",
+        nargs="+",
+        metavar="path",
+        help="One or more .ioc/.c files or glob patterns (e.g. '**/*.ioc') to scan",
+    )
     parser.add_argument("--format", choices=["text", "json"], default="text")
     parser.add_argument(
         "--fail-on", choices=["info", "warning", "error", "never"], default="warning"
@@ -74,6 +82,45 @@ def _expand_nvic_checks(raw: str | None) -> frozenset[str]:
     return frozenset(checks)
 
 
+def _is_glob(pattern: str) -> bool:
+    return any(c in pattern for c in _GLOB_CHARS)
+
+
+def _resolve_paths(raw_paths: list[str]) -> tuple[list[Path], list[str]]:
+    """Expand globs (Windows shells don't) and literal paths.
+
+    Returns (resolved_paths, error_messages). A literal path that doesn't
+    exist, or a glob that matches nothing, is reported as an error rather
+    than silently dropped -- a typo'd glob passing CI with zero files
+    scanned is worse than a hard failure.
+    """
+    resolved: list[Path] = []
+    errors: list[str] = []
+    seen: set[str] = set()
+
+    for raw in raw_paths:
+        if _is_glob(raw):
+            matches = sorted(glob_module.glob(raw, recursive=True))
+            if not matches:
+                errors.append(f"no files matched: {raw}")
+                continue
+            candidates = [Path(m) for m in matches if Path(m).is_file()]
+        else:
+            p = Path(raw)
+            if not p.exists():
+                errors.append(f"{raw}: no such file")
+                continue
+            candidates = [p]
+
+        for p in candidates:
+            key = str(p.resolve())
+            if key not in seen:
+                seen.add(key)
+                resolved.append(p)
+
+    return resolved, errors
+
+
 def _build_rules(args: argparse.Namespace) -> list[Rule]:
     rules: list[Rule] = [
         PinConflictRule(),
@@ -103,36 +150,51 @@ def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
 
-    if not args.path.exists():
-        print(f"preflight: error: {args.path}: no such file", file=sys.stderr)
-        return 2
+    resolved_paths, resolve_errors = _resolve_paths(args.paths)
+    for msg in resolve_errors:
+        print(f"preflight: error: {msg}", file=sys.stderr)
 
-    try:
-        cfg = parse(args.path, mcu_override=args.mcu, hse_hz_override=args.hse_hz)
-    except Exception as exc:  # CLI boundary: never crash the process on bad input
-        print(f"preflight: error: could not parse {args.path}: {exc}", file=sys.stderr)
+    if not resolved_paths:
         return 2
 
     rules = _build_rules(args)
-    results = [rule.run(cfg) for rule in rules]
+    files_results: list[tuple[Config, list[RuleResult]]] = []
+    had_parse_error = bool(resolve_errors)
+
+    for path in resolved_paths:
+        try:
+            cfg = parse(path, mcu_override=args.mcu, hse_hz_override=args.hse_hz)
+        except Exception as exc:  # CLI boundary: never crash the process on bad input
+            print(f"preflight: error: could not parse {path}: {exc}", file=sys.stderr)
+            had_parse_error = True
+            continue
+        results = [rule.run(cfg) for rule in rules]
+        files_results.append((cfg, results))
+
+    if not files_results:
+        return 2
 
     use_color = not args.no_color and sys.stdout.isatty() and "NO_COLOR" not in os.environ
 
     if args.format == "json":
-        output = jsonout.render(cfg, results, version=__version__)
+        output = jsonout.render(files_results, version=__version__)
     else:
         output = text.render(
-            cfg, results, use_color=use_color, verbose=args.verbose, version=__version__
+            files_results, use_color=use_color, verbose=args.verbose, version=__version__
         )
     print(output, end="")
+
+    if had_parse_error:
+        return 2
 
     if args.fail_on == "never":
         return 0
     threshold = _SEVERITY_BY_NAME[args.fail_on]
-    for r in results:
-        for f in r.findings:
-            if f.severity >= threshold:
-                return 1
+    for _cfg, results in files_results:
+        for r in results:
+            for f in r.findings:
+                if f.severity >= threshold:
+                    return 1
     return 0
 
 

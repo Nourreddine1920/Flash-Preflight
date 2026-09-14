@@ -41,8 +41,10 @@ def test_json_format_is_valid_json(capsys):
     code = main([str(FIXTURES / "pf002_broken_baud_error.ioc"), "--format", "json"])
     out = capsys.readouterr().out
     data = json.loads(out)
-    assert data["source"].endswith("pf002_broken_baud_error.ioc")
+    assert data["schema_version"] == "1.0"
+    assert data["files"][0]["source"].endswith("pf002_broken_baud_error.ioc")
     assert data["summary"]["errors"] == 1
+    assert data["findings"][0]["rule_id"] == "PF002"
     assert code == 1
 
 
@@ -85,3 +87,68 @@ def test_nvic_checks_shorthand_a_expands_to_a1_a2():
     assert _expand_nvic_checks("a,b1") == frozenset({"a1", "a2", "b1"})
     assert _expand_nvic_checks(None) == frozenset({"a1", "a2", "b1", "b2", "b3"})
     assert _expand_nvic_checks("b3") == frozenset({"b3"})
+
+
+# --------------------------------------------------------------------------
+# Multi-file input (PLAN-PHASE2.md §2)
+# --------------------------------------------------------------------------
+
+
+def test_multiple_literal_paths_all_scanned(capsys):
+    code = main(
+        [
+            str(FIXTURES / "pf001_clean.ioc"),
+            str(FIXTURES / "pf001_broken_dup_signal.ioc"),
+            "--no-color",
+        ]
+    )
+    out = capsys.readouterr().out
+    assert code == 1  # the second file has a finding
+    assert out.count("pf001_clean.ioc") >= 1
+    assert out.count("pf001_broken_dup_signal.ioc") >= 1
+    assert "across 2 files" in out
+
+
+def test_single_file_summary_wording_unchanged(capsys):
+    # Single-file output must keep saying "across N rules", not "across 1 files".
+    main([str(FIXTURES / "pf001_clean.ioc"), "--no-color"])
+    out = capsys.readouterr().out
+    assert "across 4 rules" in out
+    assert "files" not in out.split("\n")[-2]  # the footer line
+
+
+def test_glob_pattern_expanded(capsys):
+    pattern = str(FIXTURES / "pf004_broken_*.ioc")
+    code = main([pattern, "--no-color", "--rule", "PF004"])
+    out = capsys.readouterr().out
+    assert code == 1
+    # all three pf004_broken_*.ioc fixtures should have been scanned
+    assert out.count("preflight 0.1.0") == 3
+
+
+def test_glob_matching_nothing_exits_two(capsys):
+    code = main([str(FIXTURES / "no_such_prefix_*.ioc")])
+    assert code == 2
+    err = capsys.readouterr().err
+    assert "no files matched" in err
+
+
+def test_duplicate_paths_deduplicated(capsys):
+    p = str(FIXTURES / "pf001_clean.ioc")
+    main([p, p, "--no-color"])
+    out = capsys.readouterr().out
+    assert out.count("preflight 0.1.0") == 1
+
+
+def test_one_missing_among_many_exits_two_but_reports_the_rest(capsys):
+    code = main(
+        [
+            str(FIXTURES / "pf001_clean.ioc"),
+            str(FIXTURES / "does_not_exist.ioc"),
+            "--no-color",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert code == 2
+    assert "pf001_clean.ioc" in captured.out  # the good file was still scanned and reported
+    assert "no such file" in captured.err or "does_not_exist" in captured.err

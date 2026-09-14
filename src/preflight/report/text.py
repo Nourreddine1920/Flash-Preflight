@@ -1,4 +1,4 @@
-"""Human-readable terminal report (PLAN.md §10.1)."""
+"""Human-readable terminal report (PLAN.md §10.1, multi-file per PLAN-PHASE2.md §2.2)."""
 
 from __future__ import annotations
 
@@ -38,16 +38,20 @@ def _severity_label(sev: Severity, use_color: bool) -> str:
     return _c("INFO", _DIM, use_color)
 
 
-def render(
+def _render_one_file(
     cfg: Config,
     results: list[RuleResult],
     *,
-    use_color: bool = True,
-    width: int | None = None,
-    verbose: bool = False,
-    version: str = "0.1.0",
-) -> str:
-    term_width = width or min(shutil.get_terminal_size(fallback=(100, 24)).columns, 100)
+    use_color: bool,
+    term_width: int,
+    verbose: bool,
+    version: str,
+) -> tuple[list[str], int, int, int, int]:
+    """Renders one file's header/summary/detail/diagnostics block.
+
+    Returns (lines, errors, warnings, rules_run, rules_skipped) -- the counts
+    feed the caller's aggregated footer rather than being printed here.
+    """
     lines: list[str] = []
 
     mcu_desc = cfg.mcu.raw_name or cfg.mcu.family or "unknown MCU"
@@ -67,8 +71,8 @@ def render(
             summary_line += f"  ({r.skip_reason})"
         lines.append(summary_line)
 
-    total_errors = 0
-    total_warnings = 0
+    errors = 0
+    warnings = 0
     rules_run = 0
     rules_skipped = 0
 
@@ -79,9 +83,9 @@ def render(
         rules_run += 1
         for f in r.findings:
             if f.severity is Severity.ERROR:
-                total_errors += 1
+                errors += 1
             elif f.severity is Severity.WARNING:
-                total_warnings += 1
+                warnings += 1
 
         if not r.findings:
             continue
@@ -115,13 +119,58 @@ def render(
             loc_str = f"  ({d.loc.file}:{d.loc.line})" if d.loc else ""
             lines.append(f"  [{d.level.name}] {d.message}{loc_str}")
 
+    return lines, errors, warnings, rules_run, rules_skipped
+
+
+def render(
+    files: list[tuple[Config, list[RuleResult]]],
+    *,
+    use_color: bool = True,
+    width: int | None = None,
+    verbose: bool = False,
+    version: str = "0.1.0",
+) -> str:
+    term_width = width or min(shutil.get_terminal_size(fallback=(100, 24)).columns, 100)
+    lines: list[str] = []
+
+    total_errors = 0
+    total_warnings = 0
+    total_rules_run = 0
+    total_rules_skipped = 0
+    total_rule_slots = 0
+
+    for i, (cfg, results) in enumerate(files):
+        if i > 0:
+            lines.append("")
+        file_lines, errors, warnings, rules_run, rules_skipped = _render_one_file(
+            cfg,
+            results,
+            use_color=use_color,
+            term_width=term_width,
+            verbose=verbose,
+            version=version,
+        )
+        lines.extend(file_lines)
+        total_errors += errors
+        total_warnings += warnings
+        total_rules_run += rules_run
+        total_rules_skipped += rules_skipped
+        total_rule_slots += len(results)
+
     lines.append("")
     error_word = "error" if total_errors == 1 else "errors"
     warning_word = "warning" if total_warnings == 1 else "warnings"
-    summary = (
-        f"{total_errors} {error_word}, {total_warnings} {warning_word} across "
-        f"{len(results)} rules.  {rules_run} rules run, {rules_skipped} skipped."
-    )
+    if len(files) == 1:
+        # Preserves the exact single-file wording/format from before multi-file support.
+        summary = (
+            f"{total_errors} {error_word}, {total_warnings} {warning_word} across "
+            f"{total_rule_slots} rules.  {total_rules_run} rules run, {total_rules_skipped} skipped."
+        )
+    else:
+        summary = (
+            f"{total_errors} {error_word}, {total_warnings} {warning_word} across "
+            f"{len(files)} files.  {total_rules_run} rules run, {total_rules_skipped} skipped."
+        )
     lines.append(summary)
 
     return "\n".join(lines) + "\n"
