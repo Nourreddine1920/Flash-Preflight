@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.11', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: pip install -e ".[dev]"
+      - run: pytest -q
+
+  # An action/hook that has never actually been executed is not verified to
+  # work. Both self-tests below run the real action.yml / pre-commit hook
+  # config against fixtures already in the repo, asserting both the "clean
+  # passes" and "broken fails" directions.
+  action-self-test:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Action passes on a clean fixture
+        uses: ./
+        with:
+          path: tests/fixtures/pf001_clean.ioc
+
+      - name: Action fails on a broken fixture
+        id: broken
+        uses: ./
+        continue-on-error: true
+        with:
+          path: tests/fixtures/pf001_broken_dup_signal.ioc
+
+      - name: Assert the broken-fixture step actually failed
+        if: steps.broken.outcome != 'failure'
+        shell: bash
+        run: |
+          echo "::error::Expected the broken-fixture action step to fail, but it did not."
+          exit 1
+
+  pre-commit-self-test:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install pre-commit
+
+      - name: Hook passes on a clean fixture
+        run: pre-commit try-repo . preflight --files tests/fixtures/pf001_clean.ioc
+
+      - name: Hook fails on a broken fixture
+        shell: bash
+        run: |
+          if pre-commit try-repo . preflight --files tests/fixtures/pf001_broken_dup_signal.ioc; then
+            echo "::error::Expected the pre-commit hook to fail on a broken fixture, but it passed."
+            exit 1
+          fi

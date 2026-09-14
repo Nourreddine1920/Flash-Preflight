@@ -1,0 +1,60 @@
+name: 'Preflight STM32 config check'
+description: 'Static analysis for STM32 CubeMX .ioc and HAL .c configuration bugs'
+branding:
+  icon: 'check-circle'
+  color: 'blue'
+
+inputs:
+  path:
+    description: 'File(s) or glob pattern to scan'
+    required: false
+    default: '**/*.ioc'
+  fail-on:
+    description: 'Minimum severity that fails the step (info|warning|error|never)'
+    required: false
+    default: 'warning'
+  format:
+    description: 'Output format (text|json)'
+    required: false
+    default: 'text'
+  python-version:
+    description: 'Python version used to run preflight'
+    required: false
+    default: '3.11'
+  args:
+    description: 'Extra preflight CLI arguments (e.g. --mcu STM32F407VGTx)'
+    required: false
+    default: ''
+
+runs:
+  using: 'composite'
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Install preflight
+      shell: bash
+      # Installs the action's own checkout. Correct only because the action
+      # and the Python package live in the same repo -- if the action is
+      # ever split into its own repo, this line needs to change to a
+      # versioned `pip install preflight-stm32==X.Y.Z` instead.
+      run: pip install "$ACTION_PATH"
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+
+    - name: Run preflight
+      shell: bash
+      # PF_PATH and PF_ARGS are deliberately unquoted so a glob pattern or a
+      # multi-token args string splits into separate CLI arguments -- the
+      # CLI does its own glob expansion (Windows shells don't expand globs),
+      # so this works the same on every runner OS.
+      # Inputs are passed via env: rather than interpolated into the run:
+      # body directly, which is the standard defense against script
+      # injection in composite actions.
+      run: preflight $PF_PATH --fail-on "$PF_FAIL_ON" --format "$PF_FORMAT" $PF_ARGS
+      env:
+        PF_PATH: ${{ inputs.path }}
+        PF_FAIL_ON: ${{ inputs.fail-on }}
+        PF_FORMAT: ${{ inputs.format }}
+        PF_ARGS: ${{ inputs.args }}
