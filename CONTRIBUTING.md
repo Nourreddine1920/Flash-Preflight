@@ -1,96 +1,115 @@
 # Contributing to Preflight
 
-## Project boundaries
+Thanks for helping. This guide assumes you have never seen the code.
 
-These are non-negotiable, checked in review, not suggestions:
+## Ground rules
 
-- **No network calls, no LLM calls.** Every finding must come from genuinely deterministic
-  analysis of parsed data — same input, same output, forever.
-- **No third-party runtime dependencies.** stdlib only. Dev-only tools (`pytest`) are fine.
-- **No fabricated detection.** If a rule doesn't have the data it needs, it reports `SKIPPED`
-  with a reason — it never guesses, and never emits a placeholder finding.
-- **Every `Finding` cites a real `Loc(file, line, key)`.** No finding without a location a user
-  can jump to.
+- **No network calls, no LLM calls.** Same input, same output, always.
+- **No third-party runtime dependencies** (stdlib only; `pytest` for dev is fine).
+- **Never guess.** If a rule lacks the data it needs, it returns `SKIPPED` with a
+  reason. It never emits a placeholder finding.
+- **Every finding cites a real location** (`Loc(file, line, key)`).
 
-## Adding a rule
-
-The rule engine is designed so this is the main way to extend the project. Concretely:
-
-1. **Subclass `Rule`** in a new `src/preflight/rules/<name>.py`:
-
-   ```python
-   from preflight.findings import Finding
-   from preflight.model import Config
-   from preflight.rules.base import Applicability, Rule
-
-   class MyNewRule(Rule):
-       id = "PF005"
-       name = "Short human name"
-       description = "One-line description of what this catches"
-
-       def applies_to(self, cfg: Config) -> Applicability:
-           if <required data absent>:
-               return Applicability(False, "why this rule can't run on this input")
-           return Applicability(True)
-
-       def check(self, cfg: Config) -> list[Finding]:
-           ...  # return a Finding for every real issue found; [] if clean
-   ```
-
-2. **Register it** in two places (yes, both — see [Known issue](#known-issue-duplicated-rule-registration) below):
-   - append an instance to `ALL_RULES` in `src/preflight/rules/__init__.py`
-   - construct it in `_build_rules()` in `src/preflight/cli.py`
-
-3. **The contract your rule must follow:**
-   - Consume only `Config` — never read files, never take a path. Both parsers
-     (`.ioc` and `.c`) already normalize into this one shape so your rule works on either.
-   - Return `Applicability(False, reason)` rather than running when the input lacks what you
-     need. Never emit a finding based on a guess.
-   - Every `Finding` needs a real `loc`, a plain-English `detail` that names the actual numbers
-     involved (not "value mismatch detected" — say what the values are), and a `remediation`
-     that's a concrete next action.
-
-4. **Add fixtures.** Under `tests/fixtures/`, add at least one `pfNNN_clean.*` and one
-   `pfNNN_broken_<mechanism>.*` per detection mechanism your rule implements — realistic content,
-   not minimal stubs (look at the existing fixtures for the level of realism expected: real
-   CubeMX `.ioc` key/value shapes, real HAL call patterns).
-
-5. **Add `tests/test_rule_pf005.py`** exercising each mechanism against its fixture, plus the
-   `SKIPPED` path when the input doesn't apply.
-
-6. **Run `pytest`.** All existing tests must stay green — this is enforced in CI.
-
-## Architecture at a glance
-
-```
-parsers/{ioc,cfile}.py  -->  Config  -->  rules/*.py  -->  RuleResult / Finding  -->  report/{text,jsonout}.py
-```
-
-Both parsers produce the same `Config` shape (see `model.py`), so every rule is source-agnostic:
-it never knows or cares whether the input was a `.ioc` or a `.c` file.
-
-- `clocks.py` — the only place clock-tree/baud-rate math lives. If your rule needs a derived
-  frequency, call `clocks.solve()` / `clocks.compute_baud()` rather than reimplementing.
-- `knowledge/` — static STM32 fact tables (family → core, bus placement, HAL function names).
-  Extending family/peripheral coverage usually means adding here, not touching a rule.
-- `parsers/clex.py` — the C lexer. If you need to scan `.c` source for a new pattern, use the
-  already-stripped text it produces (comments and string literals are blanked) rather than
-  regexing raw source, which will false-positive on the first commented-out example.
-
-## Known issue: duplicated rule registration
-
-`rules/__init__.py::ALL_RULES` and `cli.py::_build_rules()` both construct rule instances
-separately — the latter exists because some rules take CLI-configured options
-(`--baud-tolerance-pct`, `--nvic-checks`, etc.) that `ALL_RULES`'s default instances don't have.
-Forgetting to update `cli.py` means your rule runs in tests but silently never runs from the
-actual CLI. This is flagged as a known rough edge, not a deliberate design — a PR that collapses
-both into one factory function is welcome.
-
-## Testing
+## Set up
 
 ```sh
+git clone <your fork> && cd preflight
 pip install -e ".[dev]"
-pytest
+pytest -q            # all green before you start
+preflight --list-rules
 ```
 
-148+ tests, no network access needed, runs in well under a second.
+## How the pieces fit
+
+```
+parsers (.ioc / .c / plugins)  ->  Config  ->  rules  ->  Findings  ->  text / JSON report
+```
+
+Both parsers produce the same `Config` (see `src/preflight/model.py`), so a rule
+never knows or cares whether its input was a `.ioc` or a `.c` file. Rules only
+read a `Config`; they never open files.
+
+## Add a rule (5 steps)
+
+A rule can live **in this repo** or in **your own pip package** (a plugin).
+The code is identical; only where you register it differs.
+
+**1. Implement the interface.** Subclass `Rule`:
+
+```python
+from preflight.findings import Finding, Loc, Severity
+from preflight.model import Config
+from preflight.rules.base import Applicability, Rule
+
+
+class NoUnusedPins(Rule):
+    id = "PF005"                       # unique; built-ins use PF001-PF004
+    name = "Short human name"
+    description = "One line: what this catches"
+    docs = "Optional longer text shown by `preflight --explain PF005`."
+
+    def applies_to(self, cfg: Config) -> Applicability:
+        if not cfg.pins:
+            return Applicability(False, "no pin assignments found")   # -> SKIPPED
+        return Applicability(True)
+
+    def check(self, cfg: Config) -> list[Finding]:
+        findings = []
+        for pin in cfg.pins:
+            if <problem>:
+                findings.append(Finding(
+                    rule_id=self.id, severity=Severity.WARNING,
+                    title="One line, under 70 characters",
+                    detail="What is wrong, naming the actual values involved.",
+                    loc=pin.loc,
+                    evidence={"pin": pin.canonical},
+                    remediation="A concrete next action.",
+                ))
+        return findings
+```
+
+`Config` holds `pins`, `clocks`, `peripherals`, `interrupts`, `mcu`, and (for `.c`
+input) `code`. If your rule needs a CLI option, override
+`from_options(cls, options)`; otherwise the default `cls()` is used.
+
+**2. Register it.**
+- *In this repo:* add the class to `BUILTIN_RULE_CLASSES` in
+  `src/preflight/rules/registry.py`.
+- *As a plugin package:* in **your** `pyproject.toml`:
+
+  ```toml
+  [project.entry-points."preflight.rules"]
+  my_rule = "my_package.rules:NoUnusedPins"
+  ```
+
+  After `pip install`, `preflight --list-rules` shows it as `[plugin:my_package]`.
+  A plugin that fails to import, isn't a `Rule`, or reuses an id is skipped with
+  a warning; it never breaks the other rules.
+
+**3. Add a fixture pair** under `tests/fixtures/` (real content, not stubs;
+copy the shape of an existing fixture):
+- `pf005_clean.ioc` (or `.c`): a realistic file the rule must **pass**.
+- `pf005_broken_<mechanism>.ioc`: a realistic file that trips exactly one
+  detection mechanism. One broken fixture per mechanism.
+
+**4. Add tests** in `tests/test_rule_pf005.py`: clean passes, each broken
+fixture yields the expected finding (rule id, severity, and the values in
+`evidence`), and the `SKIPPED` path when the input doesn't apply.
+
+**5. Document it** by adding `src/preflight/rule_docs/PF005.md` with the
+sections `## What goes wrong`, `## Example`, `## How to fix` (see PF001.md).
+`preflight --explain PF005` prints it. Plugins can use the `docs` attribute instead.
+
+## Submitting
+
+1. Branch from `main`, keep the change focused.
+2. `pytest -q` must be green (CI runs it on Python 3.11 and 3.12).
+3. Open a PR describing what the rule catches and why it's a real bug class.
+4. If you ran Preflight on a real project, please log the result in
+   `docs/findings/` (see its README), including false positives.
+
+## Other contributions
+
+- **Another MCU family:** see [docs/adding-mcu-support.md](docs/adding-mcu-support.md).
+- **Better rule docs:** edit the files in `src/preflight/rule_docs/`.
+- **Bug reports:** include the file (or a minimal excerpt), the command, and the output.
