@@ -12,6 +12,7 @@ the HAL driver's own BRR computation (`UART_DIV_SAMPLING16`,
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from fractions import Fraction
 
@@ -25,13 +26,22 @@ class ClockError(Exception):
     """Raised when a clock tree cannot be derived from the given inputs."""
 
 
+_SOLVERS: dict[str, Callable[[ClockTree], ClockTree]] = {}
+
+
+def register_clock_solver(family: str, solver: Callable[[ClockTree], ClockTree]) -> None:
+    """Register a clock-tree solver for an MCU family. A solver takes a
+    ClockTree with sources/dividers filled in and returns it with the derived
+    sysclk_hz/hclk_hz/pclk1_hz/pclk2_hz set (raise ClockError if it can't)."""
+    _SOLVERS[family] = solver
+
+
 def solve(family: str | None, tree: ClockTree) -> ClockTree:
     """Return a copy of `tree` with sysclk_hz/hclk_hz/pclk1_hz/pclk2_hz filled in."""
-    if family == "STM32F4":
-        return _solve_f4(tree)
-    if family == "STM32F1":
-        return _solve_f1(tree)
-    raise ClockError(f"clock derivation not implemented for family {family!r}")
+    solver = _SOLVERS.get(family) if family else None
+    if solver is None:
+        raise ClockError(f"clock derivation not implemented for family {family!r}")
+    return solver(tree)
 
 
 def _pll_source_hz_f4(tree: ClockTree) -> Fraction:
@@ -122,6 +132,10 @@ def _finish(tree: ClockTree, sysclk: Fraction, *, hsi_used: int) -> ClockTree:
 
 def _to_int_hz(value: Fraction) -> int:
     return round(value)
+
+
+register_clock_solver("STM32F4", _solve_f4)
+register_clock_solver("STM32F1", _solve_f1)
 
 
 # --------------------------------------------------------------------------

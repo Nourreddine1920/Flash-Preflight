@@ -9,6 +9,7 @@ from preflight.findings import Diagnostic, Loc
 class SourceKind(StrEnum):
     IOC = "ioc"
     CFILE = "c"
+    OTHER = "other"  # produced by plugin parsers for non-STM32 config formats
 
 
 @dataclass(frozen=True)
