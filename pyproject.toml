@@ -21,5 +21,8 @@ package-dir = {"" = "src"}
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+preflight = ["rule_docs/*.md"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
