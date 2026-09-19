@@ -6,16 +6,14 @@ import os
 import sys
 from pathlib import Path
 
-from preflight import __version__
-from preflight.findings import RuleResult, Severity
+from preflight import __version__, explain
+from preflight.findings import RuleResult, Severity, Status
 from preflight.model import Config
 from preflight.parsers import parse
 from preflight.report import jsonout, text
+from preflight.rules import registry
 from preflight.rules.base import Rule
-from preflight.rules.clock_baud import ClockBaudRule
-from preflight.rules.nvic import DEFAULT_NVIC_CHECKS, NvicRule
-from preflight.rules.pin_conflict import PinConflictRule
-from preflight.rules.uninit_peripheral import UninitPeripheralRule
+from preflight.rules.nvic import DEFAULT_NVIC_CHECKS
 
 _SEVERITY_BY_NAME = {"info": Severity.INFO, "warning": Severity.WARNING, "error": Severity.ERROR}
 _GLOB_CHARS = frozenset("*?[")
@@ -28,7 +26,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "paths",
-        nargs="+",
+        nargs="*",
         metavar="path",
         help="One or more .ioc/.c files or glob patterns (e.g. '**/*.ioc') to scan",
     )
@@ -42,6 +40,12 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="rules",
         metavar="PFxxx",
         help="Run only this rule (may be given multiple times)",
+    )
+    parser.add_argument("--list-rules", action="store_true", help="List available rules and exit")
+    parser.add_argument(
+        "--explain",
+        metavar="PFxxx",
+        help="Print the documentation for a rule (why it matters, example, fix) and exit",
     )
     parser.add_argument(
         "--nvic-checks",
@@ -122,20 +126,38 @@ def _resolve_paths(raw_paths: list[str]) -> tuple[list[Path], list[str]]:
 
 
 def _build_rules(args: argparse.Namespace) -> list[Rule]:
-    rules: list[Rule] = [
-        PinConflictRule(),
-        ClockBaudRule(
-            baud_tolerance_pct=args.baud_tolerance_pct,
-            baud_error_pct=args.baud_error_pct,
-            trust_declared_clocks=args.trust_declared_clocks,
-        ),
-        UninitPeripheralRule(),
-        NvicRule(checks=_expand_nvic_checks(args.nvic_checks)),
-    ]
-    if args.rules:
-        wanted = {r.upper() for r in args.rules}
-        rules = [r for r in rules if r.id in wanted]
-    return rules
+    options = {
+        "baud_tolerance_pct": args.baud_tolerance_pct,
+        "baud_error_pct": args.baud_error_pct,
+        "trust_declared_clocks": args.trust_declared_clocks,
+        "nvic_checks": _expand_nvic_checks(args.nvic_checks),
+    }
+    only = {r.upper() for r in args.rules} if args.rules else None
+    return registry.build_rules(options, only)
+
+
+def _run_rule(rule: Rule, cfg: Config) -> tuple[RuleResult, bool]:
+    """Runs one rule. A crashing rule (in practice a third-party plugin) is
+    reported as SKIPPED with the reason and makes the run exit 2, instead of
+    a traceback that hides every other rule's results."""
+    try:
+        return rule.run(cfg), False
+    except Exception as exc:
+        reason = f"rule crashed: {type(exc).__name__}: {exc}"
+        print(f"preflight: error: {rule.id}: {reason}", file=sys.stderr)
+        return RuleResult(rule.id, rule.name, Status.SKIPPED, [], reason), True
+
+
+def _explain(rule_id: str) -> int:
+    wanted = rule_id.upper()
+    known = registry.load_rule_classes()
+    for cls, _origin in known:
+        if cls.id == wanted:
+            print(explain.get_doc(cls).rstrip() + "\n", end="")
+            return 0
+    ids = ", ".join(cls.id for cls, _ in known)
+    print(f"preflight: error: unknown rule {rule_id!r} (available: {ids})", file=sys.stderr)
+    return 2
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -150,6 +172,15 @@ def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
 
+    if args.list_rules:
+        for cls, origin in registry.load_rule_classes():
+            print(f"{cls.id}  {cls.name}  [{origin}]")
+        return 0
+    if args.explain:
+        return _explain(args.explain)
+    if not args.paths:
+        parser.error("at least one path is required (or use --list-rules / --explain)")
+
     resolved_paths, resolve_errors = _resolve_paths(args.paths)
     for msg in resolve_errors:
         print(f"preflight: error: {msg}", file=sys.stderr)
@@ -159,16 +190,20 @@ def main(argv: list[str] | None = None) -> int:
 
     rules = _build_rules(args)
     files_results: list[tuple[Config, list[RuleResult]]] = []
-    had_parse_error = bool(resolve_errors)
+    had_error = bool(resolve_errors)
 
     for path in resolved_paths:
         try:
             cfg = parse(path, mcu_override=args.mcu, hse_hz_override=args.hse_hz)
         except Exception as exc:  # CLI boundary: never crash the process on bad input
             print(f"preflight: error: could not parse {path}: {exc}", file=sys.stderr)
-            had_parse_error = True
+            had_error = True
             continue
-        results = [rule.run(cfg) for rule in rules]
+        results = []
+        for rule in rules:
+            result, crashed = _run_rule(rule, cfg)
+            results.append(result)
+            had_error = had_error or crashed
         files_results.append((cfg, results))
 
     if not files_results:
@@ -184,7 +219,7 @@ def main(argv: list[str] | None = None) -> int:
         )
     print(output, end="")
 
-    if had_parse_error:
+    if had_error:
         return 2
 
     if args.fail_on == "never":

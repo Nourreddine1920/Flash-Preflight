@@ -46,6 +46,14 @@ class ClockBaudRule(Rule):
         self.baud_error_pct = baud_error_pct
         self.trust_declared_clocks = trust_declared_clocks
 
+    @classmethod
+    def from_options(cls, options):
+        return cls(
+            baud_tolerance_pct=options.get("baud_tolerance_pct", BAUD_WARN_PCT),
+            baud_error_pct=options.get("baud_error_pct", BAUD_ERR_PCT),
+            trust_declared_clocks=options.get("trust_declared_clocks", True),
+        )
+
     def _candidates(self, cfg: Config) -> list[Peripheral]:
         return [
             p

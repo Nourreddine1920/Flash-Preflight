@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import ClassVar
 
@@ -22,6 +23,13 @@ class Rule(ABC):
     id: ClassVar[str]
     name: ClassVar[str]
     description: ClassVar[str]
+
+    @classmethod
+    def from_options(cls, options: Mapping[str, object]) -> Rule:
+        """Factory the CLI uses to build a rule. Override to read CLI-driven
+        options (thresholds etc.); the default ignores them, so a rule that
+        needs no configuration only has to define `check` and `applies_to`."""
+        return cls()
 
     @abstractmethod
     def applies_to(self, cfg: Config) -> Applicability: ...

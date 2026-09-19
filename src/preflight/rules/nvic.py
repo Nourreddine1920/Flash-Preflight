@@ -34,6 +34,10 @@ class NvicRule(Rule):
     def __init__(self, *, checks: frozenset[str] = DEFAULT_NVIC_CHECKS):
         self.checks = checks
 
+    @classmethod
+    def from_options(cls, options):
+        return cls(checks=options.get("nvic_checks", DEFAULT_NVIC_CHECKS))
+
     def applies_to(self, cfg: Config) -> Applicability:
         if not cfg.interrupts:
             return Applicability(False, "no NVIC interrupt configuration found")

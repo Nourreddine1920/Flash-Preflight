@@ -1,19 +1,11 @@
 from __future__ import annotations
 
 from preflight.rules.base import Applicability, Rule
-from preflight.rules.clock_baud import ClockBaudRule
-from preflight.rules.nvic import NvicRule
-from preflight.rules.pin_conflict import PinConflictRule
-from preflight.rules.uninit_peripheral import UninitPeripheralRule
+from preflight.rules.registry import BUILTIN_RULE_CLASSES
 
-# Explicit, ordered list -- no plugin discovery, no importlib scanning.
-# cli.py iterates this (optionally filtered by --rule) and always reports
-# on all four, including ones that end up SKIPPED.
-ALL_RULES: list[Rule] = [
-    PinConflictRule(),
-    ClockBaudRule(),
-    UninitPeripheralRule(),
-    NvicRule(),
-]
+# Default-configured instances of the built-in rules. The CLI does not use
+# this list -- it goes through preflight.rules.registry so plugins and CLI
+# options are honoured. Kept for programmatic use and tests.
+ALL_RULES: list[Rule] = [cls() for cls in BUILTIN_RULE_CLASSES]
 
 __all__ = ["ALL_RULES", "Rule", "Applicability"]
